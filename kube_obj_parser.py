@@ -9,6 +9,8 @@ sys.path.insert(0, '../python-sdc-client')
 from sdcclient import SdcClient
 import time
 from time import gmtime, strftime
+from requests.packages.urllib3.exceptions import InsecureRequestWarning
+requests.packages.urllib3.disable_warnings(InsecureRequestWarning)
 
 TEAM_NOT_EXISTING_ERR = 'Could not find team'
 USER_NOT_FOUND_ERR = 'User not found'
@@ -62,23 +64,78 @@ class KubeObjParser(object):
         # Resolve the user emails.
         # Add the users that are not part of sysdig cloud yet.
         #
+        # for o in team_members:
+        #     uname = o.strip()
+        #     res = self._customer_admin_sdclient.get_user(uname)
+        #     if res[0] == False:
+        #         if res[1] == USER_NOT_FOUND_ERR:
+        #             Logger.log("adding user " + uname)
+        #             res = self._customer_admin_sdclient.create_user_invite(uname)
+        #             Logger.log(res[1])
+        #             res = self._customer_admin_sdclient.get_user(uname)
+        #             #Logger.log("User added")    
+
+        #             if res[0] == False:
+        #                 Logger.log('cannot get user %s: %s' % (uname, res[1]), 'error')
+        #                 continue
+        #         else:
+        #             Logger.log('cannot get user %s: %s' % (uname, res[1]), 'error')
+        #             continue
+
+        #     user_id_map[uname] = res[1]['id']
+
+        # if len(user_id_map) == 0:
+        #     Logger.log('No users specified for this team. Skipping.', 'error')
+        #     return False
+
         for o in team_members:
             uname = o.strip()
             res = self._customer_admin_sdclient.get_user(uname)
             if res[0] == False:
                 if res[1] == USER_NOT_FOUND_ERR:
                     Logger.log("adding user " + uname)
-                    res = self._customer_admin_sdclient.create_user_invite(uname)
-                    res = self._customer_admin_sdclient.get_user(uname)
-                    Logger.log("User added")
-                    if res[0] == False:
-                        Logger.log('cannot get user %s: %s' % (uname, res[1]), 'error')
+                    ok, res = self._customer_admin_sdclient.create_user_invite(uname)
+                    Logger.log(res)
+                    if not ok:
+                        if res == 'The user is already signed up for a different customer: ALREADY_SIGNED_UP':
+                            user_id_map_tmp = {}
+                            print('User creation failed because', uname, 'already exists. Continuing.')
+                            ok, res = self._customer_admin_sdclient.get_users()
+                            if not ok:
+                                print('Unable to get users: ', res)
+                                sys.exit(1)
+                            all_users = res
+                            for user in all_users:
+                                #Logger.log(user['properties'])
+                                p = json.loads(json.dumps(user['properties']))
+                                user_email = p.get("user_email_alias")
+                                #Logger.log(user_email)
+                                if user_email == uname:
+                                    user_id_map_tmp[uname] = user['id']
+                                    Logger.log("Find user "+ uname)
+                                else:
+                                    continue
+                            if len(user_id_map_tmp) == 0:
+                                user_id_map[uname] = ""
+                            else:
+                                user_id_map = user_id_map_tmp
+
+                        else:
+                            print('User creation failed:', res, '. Exiting.')
+                            sys.exit(1)
+                    else:
+                        print('User creation succeeded')
+                        res = self._customer_admin_sdclient.get_user(uname)
+                        if res[0] == False:
+                            Logger.log('cannot get user %s: %s' % (uname, res[1]), 'error')
+                        else:
+                            user_id_map[uname] = res[1]['id']
                         continue
                 else:
                     Logger.log('cannot get user %s: %s' % (uname, res[1]), 'error')
                     continue
-
-            user_id_map[uname] = res[1]['id']
+            else:
+                user_id_map[uname] = res[1]['id']
 
         if len(user_id_map) == 0:
             Logger.log('No users specified for this team. Skipping.', 'error')
@@ -362,6 +419,7 @@ class KubeURLParser(object):
     def parse(self, url, endpoint):
         resp = self._kube_get(url, endpoint)
         rdata = json.loads(resp.content)
+        Logger.log(resp.status_code)
 
 #        while not 'j' in locals():
 #            j = 1
@@ -405,7 +463,15 @@ class KubeURLParser(object):
 
     def _kube_get(self, url, endpoint):
         if url:
-            return requests.get(url + endpoint)
+            Logger.log('kube_get url:' + url +', endpoint: '+ endpoint)
+            if os.path.exists(K8S_BEARER_TOKEN_FILE_NAME) and os.stat(K8S_BEARER_TOKEN_FILE_NAME).st_size > 0:
+                with open(K8S_BEARER_TOKEN_FILE_NAME, 'r') as tokenfile:
+                    headers = {'Authorization': 'Bearer ' + tokenfile.read() }
+            else:
+                Logger.log('Autodiscover of Kubernetes API server failed: Could not find bearer token at ' +
+                           K8S_BEARER_TOKEN_FILE_NAME + '. Exiting.')
+                sys.exit(1)
+            return requests.get(url + endpoint, verify = False, headers=headers)
         else:
             kube_service_port = os.getenv('KUBERNETES_SERVICE_PORT_HTTPS')
             if kube_service_port is None:
@@ -419,7 +485,5 @@ class KubeURLParser(object):
                 Logger.log('Autodiscover of Kubernetes API server failed: Could not find bearer token at ' +
                            K8S_BEARER_TOKEN_FILE_NAME + '. Exiting.')
                 sys.exit(1)
-            if os.path.exists(K8S_CA_CRT_FILE_NAME) and os.stat(K8S_CA_CRT_FILE_NAME).st_size > 0:
-                return requests.get('https://' + K8S_DEFAULT_DNS_NAME + ':' + kube_service_port + endpoint,
-                                    verify = K8S_CA_CRT_FILE_NAME,
-                                    headers=headers)
+            #if os.path.exists(K8S_CA_CRT_FILE_NAME) and os.stat(K8S_CA_CRT_FILE_NAME).st_size > 0:
+            return requests.get('https://' + K8S_DEFAULT_DNS_NAME + ':' + kube_service_port + endpoint, verify = False, headers=headers)
