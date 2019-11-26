@@ -9,9 +9,6 @@ sys.path.insert(0, '../python-sdc-client')
 from sdcclient import SdcClient
 import time
 from time import gmtime, strftime
-# fix the 'InsecureRequestWarning' error
-from requests.packages.urllib3.exceptions import InsecureRequestWarning
-requests.packages.urllib3.disable_warnings(InsecureRequestWarning)
 
 TEAM_NOT_EXISTING_ERR = 'Could not find team'
 USER_NOT_FOUND_ERR = 'User not found'
@@ -409,9 +406,15 @@ class KubeURLParser(object):
     def _kube_get(self, url, endpoint):
         headers = {}
         k8s_cert_existed = False
+        
         if os.path.exists(K8S_BEARER_TOKEN_FILE_NAME) and os.stat(K8S_BEARER_TOKEN_FILE_NAME).st_size > 0:
-            with open(K8S_BEARER_TOKEN_FILE_NAME, 'r') as tokenfile:
-                headers = {'Authorization': 'Bearer ' + tokenfile.read() }
+            try:
+                with open(K8S_BEARER_TOKEN_FILE_NAME, 'r') as tokenfile:
+                    headers = {'Authorization': 'Bearer ' + tokenfile.read() }
+            except:
+                Logger.log(sys.exc_info()[1], 'error')
+                traceback.print_exc()
+                sys.exit(1)
         else:
             Logger.log('Connect Kubernetes API server failed: Could not find bearer token at ' + K8S_BEARER_TOKEN_FILE_NAME + '. Exiting.')
             sys.exit(1)
