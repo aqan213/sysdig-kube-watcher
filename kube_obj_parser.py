@@ -13,6 +13,7 @@ from time import gmtime, strftime
 TEAM_NOT_EXISTING_ERR = 'Could not find team'
 USER_NOT_FOUND_ERR = 'User not found'
 EXISTING_CHANNEL_ERR = 'A channel with name:'
+USER_ALREADY_SIGNED_UP_ERR = 'The user is already signed up for a different customer: ALREADY_SIGNED_UP'
 ALL_SYSDIG_ANNOTATIONS = [ 'sysdigTeamMembers', 'sysdigDashboards', 'sysdigAlertEmails', 'sysdigAlerts' ]
 K8S_CA_CRT_FILE_NAME = '/var/run/secrets/kubernetes.io/serviceaccount/ca.crt'
 K8S_BEARER_TOKEN_FILE_NAME = '/var/run/secrets/kubernetes.io/serviceaccount/token'
@@ -69,16 +70,43 @@ class KubeObjParser(object):
                 if res[1] == USER_NOT_FOUND_ERR:
                     Logger.log("adding user " + uname)
                     res = self._customer_admin_sdclient.create_user_invite(uname)
-                    res = self._customer_admin_sdclient.get_user(uname)
-                    Logger.log("User added")
                     if res[0] == False:
-                        Logger.log('cannot get user %s: %s' % (uname, res[1]), 'error')
-                        continue
+                        if res[1] == USER_ALREADY_SIGNED_UP_ERR:
+                            Logger.log("user "+ uname + " already sign up!")
+                            if os.getenv('IBM_ENABLED') == 'true':
+                                Logger.log("Searching users of IBM Cloud Sysdig instance")
+                                ibm_user_id_map = {}
+                                ok, res = self._customer_admin_sdclient.get_users()
+                                if not ok:
+                                    print('Unable to get users: ', res)
+                                    sys.exit(1)
+                                all_users = res
+                                for user in all_users:
+                                    p = json.loads(json.dumps(user['properties']))
+                                    user_email = p.get("user_email_alias")
+                                    if user_email == uname:
+                                        username = user['username']
+                                        ibm_user_id_map[username] = user['id']
+                                        user_id_map[username] = user['id']
+                                        Logger.log("Find user "+ uname)
+                                    else:
+                                        continue
+                                if len(ibm_user_id_map) == 0:
+                                    Logger.log("Please make sure user "+ uname + " has IAM permission to this Sysdig instance and has onboarded to it")
+                                    continue
+                    else:
+                        Logger.log("User added")
+                        res = self._customer_admin_sdclient.get_user(uname)
+                        if res[0] == False:
+                            Logger.log('cannot get user %s: %s' % (uname, res[1]), 'error')
+                            continue
+                        else:
+                            user_id_map[uname] = res[1]['id']
                 else:
                     Logger.log('cannot get user %s: %s' % (uname, res[1]), 'error')
                     continue
-
-            user_id_map[uname] = res[1]['id']
+            else:
+                user_id_map[uname] = res[1]['id']
 
         if len(user_id_map) == 0:
             Logger.log('No users specified for this team. Skipping.', 'error')
@@ -114,6 +142,8 @@ class KubeObjParser(object):
 
         #
         # Check the existence of the team and create it if it doesn't exist
+        # Since the team response of IBM Cloud instance does not contains users info
+        # and the team users is controlled by IBM Cloud IAM. So here we will skip to edit the team users
         #
         team_exists = True
 
@@ -125,22 +155,29 @@ class KubeObjParser(object):
         else:
             teaminfo = res[1]
             teamid = teaminfo['id']
-            old_memberships = dict(map(lambda m: (m['userId'], m['role']), teaminfo['userRoles']))
-            new_memberships = dict(map(lambda u: (u, 'ROLE_TEAM_EDIT') if user_id_map[u] not in old_memberships else (u, old_memberships[user_id_map[u]]), user_id_map.keys()))
+            if os.getenv('IBM_ENABLED') == 'true':
+                Logger.log('The response of team request does not contains userRoles, skipping')
+            else:
+                old_memberships = dict(map(lambda m: (m['userId'], m['role']), teaminfo['userRoles']))
+                new_memberships = dict(map(lambda u: (u, 'ROLE_TEAM_EDIT') if user_id_map[u] not in old_memberships else (u, old_memberships[user_id_map[u]]), user_id_map.keys()))
 
         if team_exists:
             # Team exists. Detect if there are users to add and edit the team users list.
             newusers = []
-            team_uids = set(old_memberships.keys())
+            if os.getenv('IBM_ENABLED') == 'true':
+                Logger.log('Team users of IBM Cloud Sysdig are managed by IAM,skipping')
+                return False
+            else:
+                team_uids = set(old_memberships.keys())
 
-            if team_uids != set(user_id_map.values()):
-                Logger.log("Detected modified %s %s, editing team %s" % (self._type, obj_name, team_name))
-                newusers.append([u for u in user_id_map.keys() if user_id_map[u] not in team_uids])
+                if team_uids != set(user_id_map.values()):
+                    Logger.log("Detected modified %s %s, editing team %s" % (self._type, obj_name, team_name))
+                    newusers.append([u for u in user_id_map.keys() if user_id_map[u] not in team_uids])
 
-                res = self._customer_admin_sdclient.edit_team(team_name, memberships=new_memberships)
-                if res[0] == False:
-                    Logger.log('Team editing failed: ' + res[1], 'error')
-                    return False
+                    res = self._customer_admin_sdclient.edit_team(team_name, memberships=new_memberships)
+                    if res[0] == False:
+                        Logger.log('Team editing failed: ' + res[1], 'error')
+                        return False
         else:
             Logger.log("Detected new %s %s, adding team %s" % (self._type, obj_name, team_name))
 
@@ -330,7 +367,7 @@ class KubeObjParser(object):
                 skip = False
                 for ex in existing_dasboards:
                     if ex['name'] == d:
-                        if ex['isShared'] and 'annotations' in ex and ex['annotations'].get('engineTeam') == team_name + d:
+                        if ex['shared']:
                             # dashboard already exists. Skip adding it
                             skip = True
                             break
@@ -339,7 +376,7 @@ class KubeObjParser(object):
                     continue
 
                 Logger.log('adding dasboard ' + d)
-                res = teamclient.create_dashboard_from_view(d, d, None, True, {'engineTeam': team_name + d, 'ownerUser': user})
+                res = teamclient.create_dashboard_from_view(d, d, None, True, True)
                 if not res[0]:
                     Logger.log('Error creating dasboard: ' + res[1], 'error')
 

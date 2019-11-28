@@ -23,3 +23,5 @@ spec:
           value:
         - name: TEAM_PREFIX
           value: KW-
+        - name: IBM_ENABLED
+          value: "false"

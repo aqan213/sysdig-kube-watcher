@@ -34,6 +34,10 @@ KUBE_URL = os.getenv('KUBE_URL')
 if not KUBE_URL:
     log('Did not find Kubernetes API server URL at env variable "KUBE_URL". Will attempt to autodiscover.', 'info')
 
+IBM_ENABLED = os.getenv('IBM_ENABLED')
+if not IBM_ENABLED or IBM_ENABLED == 'false':
+    log('Using the Sysdig native instance', 'info')
+
 #
 # Instantiate the customer admin SDC client
 #
